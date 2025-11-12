@@ -3,6 +3,7 @@ local RunService = cloneref(game:GetService("RunService"))
 local InputService = cloneref(game:GetService("UserInputService"))
 local CoreGui = cloneref(game:GetService("CoreGui"))
 local TextService = cloneref(game:GetService("TextService"))
+local Workspace = cloneref(game:GetService("Workspace"))
 local Teams = cloneref(game:GetService('Teams'))
 local TweenService = game:GetService('TweenService');
 local RenderStepped = RunService.RenderStepped;
@@ -17,11 +18,28 @@ ProtectGui(ScreenGui);
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
 ScreenGui.Parent = CoreGui;
 
+local UIScale = Instance.new('UIScale');
+UIScale.Scale = 1;
+UIScale.Parent = ScreenGui;
+
 local Toggles = {};
 local Options = {};
 
 getgenv().Toggles = Toggles;
 getgenv().Options = Options;
+
+local function computeDeviceMobile()
+    local hasKeyboard = true
+    local success, keyboardEnabled = pcall(function()
+        return InputService.KeyboardEnabled
+    end)
+
+    if success then
+        hasKeyboard = keyboardEnabled
+    end
+
+    return InputService.TouchEnabled and not hasKeyboard
+end
 
 local Library = {
     Registry = {};
@@ -45,6 +63,22 @@ local Library = {
 
     Signals = {};
     ScreenGui = ScreenGui;
+    UIScale = UIScale;
+    CurrentScale = 1;
+    KeybindListVisible = true;
+    AutoScaleEnabled = false;
+    DefaultWindowSize = Vector2.new(720, 560);
+    WindowBaseSize = nil;
+
+    DeviceIsMobile = computeDeviceMobile();
+    MobileSimulation = false;
+    IsMobile = false;
+    MobileMenuButton = nil;
+    MobileMenuButtonHighlight = nil;
+    MobileMenuButtonInput = nil;
+    MobileMenuButtonConnections = {};
+    CameraViewportConnection = nil;
+    MenuOpen = false;
 };
 
 local RainbowStep = 0
@@ -87,7 +121,7 @@ local function GetTeamsString()
     end;
 
     table.sort(TeamList, function(str1, str2) return str1 < str2 end);
-    
+
     return TeamList;
 end;
 
@@ -133,6 +167,131 @@ function Library:Create(Class, Properties)
     return _Instance;
 end;
 
+function Library:GiveSignal(Signal)
+    -- Only used for signals not attached to library instances, as those should be cleaned up on object destruction by Roblox
+    table.insert(Library.Signals, Signal);
+end;
+
+function Library:SetScale(scale)
+    if type(scale) ~= 'number' then
+        return;
+    end;
+
+    if scale > 4 then
+        scale = scale / 100;
+    end;
+
+    scale = math.clamp(scale, 0.35, 2);
+
+    Library.CurrentScale = scale;
+
+    if Library.UIScale then
+        Library.UIScale.Scale = scale;
+    end;
+end;
+
+function Library:GetScale()
+    return Library.CurrentScale;
+end;
+
+function Library:SetKeybindListVisible(isVisible)
+    local visible = not not isVisible;
+
+    self.KeybindListVisible = visible;
+
+    if self.KeybindFrame then
+        self.KeybindFrame.Visible = visible;
+    end;
+end;
+
+function Library:IsMobileMode()
+    return self.MobileSimulation or self.DeviceIsMobile;
+end;
+
+function Library:IsSimulatingMobileInput()
+    return self.MobileSimulation and not self.DeviceIsMobile;
+end;
+
+function Library:IsMobileInput(Input)
+    if not Input then
+        return false;
+    end;
+
+    if Input.UserInputType == Enum.UserInputType.Touch then
+        return true;
+    end;
+
+    if self:IsSimulatingMobileInput() and Input.UserInputType == Enum.UserInputType.MouseButton1 then
+        return true;
+    end;
+
+    return false;
+end;
+
+function Library:RefreshMobileDetection()
+    self.DeviceIsMobile = computeDeviceMobile();
+end;
+
+function Library:SetMobileSimulation(state)
+    state = not not state;
+
+    if self.MobileSimulation == state then
+        self:UpdateMobileMode();
+        return;
+    end;
+
+    self.MobileSimulation = state;
+
+    if not state then
+        self:RefreshMobileDetection();
+    end;
+
+    self:UpdateMobileMode();
+end;
+
+function Library:RefreshKeyPickerMobileState()
+    for _, Option in next, Options do
+        if type(Option) == 'table' and Option.Type == 'KeyPicker' then
+            if not self.IsMobile and Option.MobileButton then
+                Option:RemoveMobileButton();
+            end;
+
+            if Option.Update then
+                Option:Update();
+            end;
+        end;
+    end;
+end;
+
+function Library:UpdateResponsiveScale()
+    if not self.AutoScaleEnabled then
+        if math.abs(self.CurrentScale - 1) > 1e-3 then
+            self:SetScale(1);
+        end;
+
+        return;
+    end;
+
+    local baseSize = self.WindowBaseSize or self.DefaultWindowSize;
+    local baseWidth = math.max(baseSize.X, 1);
+    local baseHeight = math.max(baseSize.Y, 1);
+
+    local camera = Workspace.CurrentCamera;
+    local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720);
+
+    local paddingX = 48;
+    local paddingY = 72;
+
+    local scaleX = (viewport.X - paddingX) / baseWidth;
+    local scaleY = (viewport.Y - paddingY) / baseHeight;
+    local computed = math.min(scaleX, scaleY, 1);
+    computed = math.clamp(computed, 0.35, 1);
+
+    if math.abs(self.CurrentScale - computed) > 1e-3 then
+        self:SetScale(computed);
+    end;
+end;
+
 function Library:ApplyTextStroke(Inst)
     Inst.TextStrokeTransparency = 1;
 
@@ -162,32 +321,160 @@ function Library:CreateLabel(Properties, IsHud)
     return Library:Create(_Instance, Properties);
 end;
 
-function Library:MakeDraggable(Instance, Cutoff)
+local DragStepId = 0;
+
+function Library:MakeDraggable(Instance, Cutoff, MoveTarget)
     Instance.Active = true;
 
-    Instance.InputBegan:Connect(function(Input)
-        if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local ObjPos = Vector2.new(
-                Mouse.X - Instance.AbsolutePosition.X,
-                Mouse.Y - Instance.AbsolutePosition.Y
-            );
+    local Target = MoveTarget or Instance;
 
-            if ObjPos.Y > (Cutoff or 40) then
+    if Target and Target ~= Instance then
+        Target.Active = true;
+    end;
+
+    local dragInput;
+    local moveConnection;
+    local inputEndedConnection;
+    local waitingForTouch = false;
+    local initialPointer = Vector2.zero;
+    local dragOffset = Vector2.zero;
+
+    local function getMousePointer()
+        local location = InputService:GetMouseLocation();
+
+        return Vector2.new(location.X, location.Y);
+    end;
+
+    local function cleanup()
+        if moveConnection then
+            moveConnection:Disconnect();
+            moveConnection = nil;
+        end;
+
+        if inputEndedConnection then
+            inputEndedConnection:Disconnect();
+            inputEndedConnection = nil;
+        end;
+
+        dragInput = nil;
+        waitingForTouch = false;
+    end;
+
+    local function apply(pointer)
+        if (not Target) or (not Target.Parent) then
+            cleanup();
+            return;
+        end;
+
+        local parentAbsPos = Vector2.zero;
+        local parent = Target.Parent;
+
+        if parent and parent:IsA('GuiBase2d') then
+            parentAbsPos = parent.AbsolutePosition;
+        end;
+
+        local anchorOffset = Vector2.new(
+            Target.AbsoluteSize.X * Target.AnchorPoint.X,
+            Target.AbsoluteSize.Y * Target.AnchorPoint.Y
+        );
+
+        local newTopLeft = pointer - dragOffset;
+
+        Target.Position = UDim2.new(
+            0,
+            newTopLeft.X - parentAbsPos.X + anchorOffset.X,
+            0,
+            newTopLeft.Y - parentAbsPos.Y + anchorOffset.Y
+        );
+    end;
+
+    Instance.InputBegan:Connect(function(Input)
+        if Input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and Input.UserInputType ~= Enum.UserInputType.Touch then
+
+            return;
+        end;
+
+        if not Target or not Target.Parent then
+            return;
+        end;
+
+        local pointer;
+
+        if Input.UserInputType == Enum.UserInputType.Touch then
+            local position = Input.Position;
+            pointer = Vector2.new(position.X, position.Y);
+        else
+            pointer = getMousePointer();
+        end;
+
+        local activationCutoff = Cutoff or 40;
+
+        if activationCutoff and activationCutoff < math.huge then
+            local bypassCutoff = Library:IsMobileInput(Input);
+
+            if not bypassCutoff then
+                local relativeY = pointer.Y - Target.AbsolutePosition.Y;
+
+                if relativeY > activationCutoff then
+                    return;
+                end;
+            end;
+        end;
+
+        cleanup();
+
+        dragInput = Input;
+        initialPointer = pointer;
+        dragOffset = pointer - Target.AbsolutePosition;
+
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+            while InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) do
+                if not Target or not Target.Parent then
+                    break;
+                end;
+
+                apply(getMousePointer());
+                RenderStepped:Wait();
+            end;
+
+            cleanup();
+
+            return;
+        end;
+
+        waitingForTouch = true;
+
+        moveConnection = InputService.InputChanged:Connect(function(change)
+            if change ~= dragInput then
                 return;
             end;
 
-            while InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) do
-                Instance.Position = UDim2.new(
-                    0,
-                    Mouse.X - ObjPos.X + (Instance.Size.X.Offset * Instance.AnchorPoint.X),
-                    0,
-                    Mouse.Y - ObjPos.Y + (Instance.Size.Y.Offset * Instance.AnchorPoint.Y)
-                );
+            local newPointer = Vector2.new(change.Position.X, change.Position.Y);
 
-                RenderStepped:Wait();
+            if waitingForTouch then
+                if (newPointer - initialPointer).Magnitude >= 6 then
+                    waitingForTouch = false;
+                else
+                    return;
+                end;
             end;
+
+            apply(newPointer);
+        end);
+
+        inputEndedConnection = InputService.InputEnded:Connect(function(endedInput)
+            if endedInput == dragInput then
+                cleanup();
+            end;
+        end);
+    end);
+
+    Instance.InputEnded:Connect(function(Input)
+        if Input == dragInput then
+            cleanup();
         end;
-    end)
+    end);
 end;
 
 function Library:AddToolTip(InfoStr, HoverInstance)
@@ -273,6 +560,195 @@ function Library:OnHighlight(HighlightInstance, Instance, Properties, Properties
         end;
     end)
 end;
+
+function Library:UpdateMobileMenuButtonState(isOpen)
+    if not Library.MobileMenuButton or not Library.MobileMenuButtonHighlight then
+        return;
+    end;
+
+    local highlight = Library.MobileMenuButtonHighlight;
+    highlight.BackgroundTransparency = isOpen and 0.25 or 0.8;
+
+    if Library.MobileMenuButtonInput then
+        Library.MobileMenuButtonInput.Text = 'MENU';
+    end;
+end;
+
+function Library:EnsureMobileMenuButton()
+    if self.MobileMenuButton or not self:IsMobileMode() then
+        return;
+    end;
+
+    local MobileMenu = self:Create('Frame', {
+        Name = 'MobileMenuButton';
+        AnchorPoint = Vector2.new(1, 0.5);
+        BackgroundColor3 = self.MainColor;
+        BorderColor3 = self.OutlineColor;
+        BorderMode = Enum.BorderMode.Inset;
+        Position = UDim2.new(1, -20, 0.5, 0);
+        Size = UDim2.fromOffset(120, 44);
+        ZIndex = 250;
+        Parent = ScreenGui;
+    });
+
+    local Highlight = self:Create('Frame', {
+        Name = 'Highlight';
+        BackgroundColor3 = self.AccentColor;
+        BackgroundTransparency = 0.8;
+        BorderSizePixel = 0;
+        Size = UDim2.new(1, 0, 1, 0);
+        ZIndex = 251;
+        Parent = MobileMenu;
+    });
+
+    self:Create('UICorner', {
+        CornerRadius = UDim.new(0, 8);
+        Parent = MobileMenu;
+    });
+
+    self:Create('UICorner', {
+        CornerRadius = UDim.new(0, 8);
+        Parent = Highlight;
+    });
+
+    local Stroke = self:Create('UIStroke', {
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
+        Color = self.OutlineColor;
+        Thickness = 1;
+        Parent = MobileMenu;
+    });
+
+    local Button = self:Create('TextButton', {
+        BackgroundTransparency = 1;
+        Font = self.Font;
+        Text = 'MENU';
+        TextColor3 = self.FontColor;
+        TextSize = 18;
+        AutoButtonColor = false;
+        Size = UDim2.new(1, 0, 1, 0);
+        ZIndex = 252;
+        Parent = MobileMenu;
+    });
+
+    self:AddToRegistry(MobileMenu, {
+        BackgroundColor3 = 'MainColor';
+        BorderColor3 = 'OutlineColor';
+    });
+
+    self:AddToRegistry(Highlight, {
+        BackgroundColor3 = 'AccentColor';
+    });
+
+    self:AddToRegistry(Button, {
+        TextColor3 = 'FontColor';
+    });
+
+    self:AddToRegistry(Stroke, {
+        Color = 'OutlineColor';
+    });
+
+    self:MakeDraggable(MobileMenu, math.huge);
+    self:MakeDraggable(Button, math.huge, MobileMenu);
+
+    for _, connection in next, self.MobileMenuButtonConnections do
+        connection:Disconnect();
+    end;
+
+    self.MobileMenuButtonConnections = {};
+
+    local clickConnection = Button.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            if Library.Toggle then
+                Library:Toggle();
+            end;
+        end);
+    end);
+
+    table.insert(self.MobileMenuButtonConnections, clickConnection);
+
+    self.MobileMenuButton = MobileMenu;
+    self.MobileMenuButtonHighlight = Highlight;
+    self.MobileMenuButtonInput = Button;
+
+    self:UpdateMobileMenuButtonState(self.MenuOpen);
+end;
+
+function Library:RemoveMobileMenuButton()
+    for _, connection in next, self.MobileMenuButtonConnections do
+        connection:Disconnect();
+    end;
+
+    self.MobileMenuButtonConnections = {};
+
+    if self.MobileMenuButton then
+        self.MobileMenuButton:Destroy();
+    end;
+
+    self.MobileMenuButton = nil;
+    self.MobileMenuButtonHighlight = nil;
+    self.MobileMenuButtonInput = nil;
+end;
+
+function Library:UpdateMobileMode()
+    local isMobile = self:IsMobileMode();
+
+    self.IsMobile = isMobile;
+    self.AutoScaleEnabled = isMobile;
+
+    if isMobile then
+        self:EnsureMobileMenuButton();
+    else
+        self:RemoveMobileMenuButton();
+    end;
+
+    self:UpdateMobileMenuButtonState(self.MenuOpen);
+    self:RefreshKeyPickerMobileState();
+    self:UpdateResponsiveScale();
+end;
+
+pcall(function()
+    Library:GiveSignal(InputService:GetPropertyChangedSignal('TouchEnabled'):Connect(function()
+        Library:RefreshMobileDetection();
+
+        if not Library.MobileSimulation then
+            Library:UpdateMobileMode();
+        end;
+    end));
+end);
+
+pcall(function()
+    Library:GiveSignal(InputService:GetPropertyChangedSignal('KeyboardEnabled'):Connect(function()
+        Library:RefreshMobileDetection();
+
+        if not Library.MobileSimulation then
+            Library:UpdateMobileMode();
+        end;
+    end));
+end);
+
+local function updateViewportConnection()
+    if Library.CameraViewportConnection then
+        Library.CameraViewportConnection:Disconnect();
+        Library.CameraViewportConnection = nil;
+    end;
+
+    local camera = Workspace.CurrentCamera;
+
+    if camera then
+        Library.CameraViewportConnection = camera:GetPropertyChangedSignal('ViewportSize'):Connect(function()
+            Library:UpdateResponsiveScale();
+        end);
+
+        Library:GiveSignal(Library.CameraViewportConnection);
+    end;
+
+    Library:UpdateResponsiveScale();
+end
+
+Library:GiveSignal(Workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(updateViewportConnection));
+updateViewportConnection();
+
+Library:UpdateMobileMode();
 
 function Library:MouseIsOverOpenedFrame()
     for Frame, _ in next, Library.OpenedFrames do
@@ -374,11 +850,6 @@ function Library:UpdateColorsUsingRegistry()
         end;
     end;
 end;
-
-function Library:GiveSignal(Signal)
-    -- Only used for signals not attached to library instances, as those should be cleaned up on object destruction by Roblox
-    table.insert(Library.Signals, Signal)
-end
 
 function Library:Unload()
     -- Unload all of the signals
@@ -551,7 +1022,7 @@ do
             Parent = HueSelectorOuter;
         });
 
-        local HueCursor = Library:Create('Frame', { 
+        local HueCursor = Library:Create('Frame', {
             BackgroundColor3 = Color3.new(1, 1, 1);
             AnchorPoint = Vector2.new(0, 0.5);
             BorderColor3 = Color3.new(0, 0, 0);
@@ -617,8 +1088,8 @@ do
         });
 
         local TransparencyBoxOuter, TransparencyBoxInner, TransparencyCursor;
-        
-        if Info.Transparency then 
+
+        if Info.Transparency then
             TransparencyBoxOuter = Library:Create('Frame', {
                 BorderColor3 = Color3.new(0, 0, 0);
                 Position = UDim2.fromOffset(4, 251);
@@ -646,7 +1117,7 @@ do
                 Parent = TransparencyBoxInner;
             });
 
-            TransparencyCursor = Library:Create('Frame', { 
+            TransparencyCursor = Library:Create('Frame', {
                 BackgroundColor3 = Color3.new(1, 1, 1);
                 AnchorPoint = Vector2.new(0.5, 0);
                 BorderColor3 = Color3.new(0, 0, 0);
@@ -756,7 +1227,7 @@ do
                     TextXAlignment = Enum.TextXAlignment.Left,
                 });
 
-                Library:OnHighlight(Button, Button, 
+                Library:OnHighlight(Button, Button,
                     { TextColor3 = 'AccentColor' },
                     { TextColor3 = 'FontColor' }
                 );
@@ -1096,6 +1567,35 @@ do
             return tostring(key)
         end
 
+        local function getFirstCharacter(str)
+            if type(str) ~= 'string' then
+                return nil
+            end
+
+            local alpha = str:match('%a')
+
+            if alpha then
+                return alpha:upper()
+            end
+
+            local nonSpace = str:match('%S')
+
+            if nonSpace then
+                return nonSpace:upper()
+            end
+        end
+
+        local parentLabelText
+
+        if ParentObj and ParentObj.TextLabel and ParentObj.TextLabel.Text then
+            parentLabelText = ParentObj.TextLabel.Text
+        end
+
+        local mobileButtonLabel = getFirstCharacter(Info.MobileButtonText)
+            or getFirstCharacter(parentLabelText)
+            or getFirstCharacter(Info.Text)
+            or 'A'
+
         local KeyPicker = {
             Value = Info.Default;
             Toggled = false;
@@ -1105,6 +1605,11 @@ do
             ChangedCallback = Info.ChangedCallback or function(New) end;
 
             SyncToggleState = Info.SyncToggleState or false;
+            MobileButtonText = mobileButtonLabel;
+            MobileButton = nil;
+            MobileButtonHighlight = nil;
+            MobileButtonInput = nil;
+            MobileButtonConnections = {};
         };
 
         local PickOuter = Library:Create('Frame', {
@@ -1277,98 +1782,37 @@ do
             RightShadow = RightShadow;
         };
 
-        local Modes = Info.Modes or { 'Always', 'Toggle', 'Hold' };
-        local ModeButtons = {};
+        KeyPicker.Show = true;
 
-        for Idx, Mode in next, Modes do
-            local ModeButton = {};
-
-            local Label = Library:CreateLabel({
-                Active = false;
-                Size = UDim2.new(1, 0, 0, 15);
-                TextSize = 13;
-                Text = Mode;
-                ZIndex = 16;
-                Parent = ModeSelectInner;
-            });
-
-            function ModeButton:Select()
-                for _, Button in next, ModeButtons do
-                    Button:Deselect();
-                end;
-
-                KeyPicker.Mode = Mode;
-
-                Label.TextColor3 = Library.AccentColor;
-                Library.RegistryMap[Label].Properties.TextColor3 = 'AccentColor';
-
-                toggleModeSelect(false);
-            end;
-
-            function ModeButton:Deselect()
-                KeyPicker.Mode = nil;
-
-                Label.TextColor3 = Library.FontColor;
-                Library.RegistryMap[Label].Properties.TextColor3 = 'FontColor';
-            end;
-
-            Label.InputBegan:Connect(function(Input)
-                if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-                    ModeButton:Select();
-                    Library:AttemptSave();
-                end;
-            end);
-
-            if Mode == KeyPicker.Mode then
-                ModeButton:Select();
-            end;
-
-            ModeButtons[Mode] = ModeButton;
-        end;
-
-        KeyPicker.Show = true
-        
-        function updateKeyDisplay()
-            local visibleCount = 0
+        local function updateKeyDisplay()
+            local visibleCount = 0;
 
             for _, Entry in next, Library.KeybindContainer:GetChildren() do
-                local info = Library.KeybindEntryInfo[Entry]
+                local info = Library.KeybindEntryInfo[Entry];
 
                 if Entry:IsA('Frame') and Entry.Name == 'KeybindEntry' and Entry.Visible then
-                    visibleCount = visibleCount + 1
+                    visibleCount = visibleCount + 1;
 
                     if info and info.Divider then
-                        info.Divider.Visible = visibleCount > 1
-                    end
+                        info.Divider.Visible = visibleCount > 1;
+                    end;
                 elseif info and info.Divider then
-                    info.Divider.Visible = false
-                end
-            end
-        end
-
-        function KeyPicker:MatchesInput(Input)
-            if KeyPicker.Value == 'None' then
-                return false;
-            end;
-
-            if Input.UserInputType == Enum.UserInputType.Keyboard then
-                if Input.KeyCode == Enum.KeyCode.Unknown then
-                    return false;
+                    info.Divider.Visible = false;
                 end;
-
-                return Input.KeyCode.Name == KeyPicker.Value;
-            elseif Input.UserInputType == Enum.UserInputType.MouseButton1 then
-                return KeyPicker.Value == 'MB1';
-            elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
-                return KeyPicker.Value == 'MB2';
             end;
-
-            return false;
         end;
 
         function KeyPicker:Update()
             if Info.NoUI then
                 return;
+            end;
+
+            if Library.IsMobile then
+                if KeyPicker.MobileButton then
+                    DisplayLabel.Text = KeyPicker.MobileButtonText or 'BTN';
+                else
+                    DisplayLabel.Text = formatKeyLabel(KeyPicker.Value);
+                end;
             end;
 
             local State = KeyPicker:GetState();
@@ -1410,27 +1854,250 @@ do
                 end;
             end;
 
+            KeyPicker:UpdateMobileButtonState();
+
             ContainerLabel.Visible = true;
 
             if not State then
                 ContainerLabel.Visible = false;
-                updateKeyDisplay()
-                return
+                updateKeyDisplay();
+                return;
             end;
 
             if KeyPicker.Show ~= nil then
-                ContainerLabel.Visible = KeyPicker.Show
-            end
+                ContainerLabel.Visible = KeyPicker.Show;
+            end;
 
-            updateKeyDisplay()
+            updateKeyDisplay();
         end;
 
         function KeyPicker:SetDisplay(Value)
-            ContainerLabel.Visible = Value
-            updateKeyDisplay()
-        end
+            ContainerLabel.Visible = Value;
+            updateKeyDisplay();
+        end;
+
+        local function disconnectMobileConnections()
+            if not KeyPicker.MobileButtonConnections then
+                return;
+            end;
+
+            for _, connection in next, KeyPicker.MobileButtonConnections do
+                if connection and connection.Disconnect then
+                    connection:Disconnect();
+                end;
+            end;
+
+            KeyPicker.MobileButtonConnections = {};
+        end;
+
+        function KeyPicker:UpdateMobileButtonState()
+            if not KeyPicker.MobileButton then
+                return;
+            end;
+
+            local highlight = KeyPicker.MobileButtonHighlight;
+            local inputButton = KeyPicker.MobileButtonInput;
+            local isActive = false;
+
+            if KeyPicker.Mode == 'Always' then
+                isActive = true;
+            elseif KeyPicker.Mode == 'Hold' then
+                isActive = KeyPicker.Toggled;
+            else
+                isActive = KeyPicker.Toggled;
+            end;
+
+            if highlight then
+                highlight.BackgroundTransparency = isActive and 0.25 or 0.8;
+            end;
+
+            if inputButton then
+                inputButton.Text = KeyPicker.MobileButtonText or 'A';
+                inputButton.Active = KeyPicker.Mode ~= 'Always';
+            end;
+        end;
+
+        function KeyPicker:RemoveMobileButton()
+            local wasToggled = KeyPicker.Toggled;
+
+            if KeyPicker.MobileButton then
+                disconnectMobileConnections();
+                KeyPicker.MobileButton:Destroy();
+                KeyPicker.MobileButton = nil;
+            end;
+
+            KeyPicker.MobileButtonHighlight = nil;
+            KeyPicker.MobileButtonInput = nil;
+            KeyPicker.Toggled = false;
+
+            if wasToggled then
+                KeyPicker:DoClick();
+            end;
+
+            if DisplayLabel and DisplayLabel.Parent then
+                KeyPicker:Update();
+            end;
+        end;
+
+        function KeyPicker:EnsureMobileButton()
+            if (not Library.IsMobile) or KeyPicker.MobileButton or Info.NoUI then
+                return KeyPicker.MobileButton;
+            end;
+
+            local ButtonFrame = Library:Create('Frame', {
+                Name = string.format('MobileKey_%s', tostring(Idx));
+                AnchorPoint = Vector2.new(0.5, 0.5);
+                BackgroundColor3 = Library.MainColor;
+                BorderColor3 = Library.OutlineColor;
+                BorderMode = Enum.BorderMode.Inset;
+                Position = UDim2.new(0.8, 0, 0.6, 0);
+                Size = UDim2.fromOffset(60, 60);
+                ZIndex = 260;
+                Parent = ScreenGui;
+            });
+
+            local Highlight = Library:Create('Frame', {
+                Name = 'Highlight';
+                BackgroundColor3 = Library.AccentColor;
+                BackgroundTransparency = 0.8;
+                BorderSizePixel = 0;
+                Size = UDim2.new(1, 0, 1, 0);
+                ZIndex = 261;
+                Parent = ButtonFrame;
+            });
+
+            local Corner = Library:Create('UICorner', {
+                CornerRadius = UDim.new(0, 12);
+                Parent = ButtonFrame;
+            });
+
+            Library:Create('UICorner', {
+                CornerRadius = UDim.new(0, 12);
+                Parent = Highlight;
+            });
+
+            local Stroke = Library:Create('UIStroke', {
+                ApplyStrokeMode = Enum.ApplyStrokeMode.Border;
+                Color = Library.OutlineColor;
+                Thickness = 1;
+                Parent = ButtonFrame;
+            });
+
+            local InputButton = Library:Create('TextButton', {
+                BackgroundTransparency = 1;
+                Font = Library.Font;
+                Text = KeyPicker.MobileButtonText or 'A';
+                TextColor3 = Library.FontColor;
+                TextSize = 24;
+                AutoButtonColor = false;
+                Size = UDim2.new(1, 0, 1, 0);
+                ZIndex = 262;
+                Parent = ButtonFrame;
+            });
+
+            Library:AddToRegistry(ButtonFrame, {
+                BackgroundColor3 = 'MainColor';
+                BorderColor3 = 'OutlineColor';
+            });
+
+            Library:AddToRegistry(Highlight, {
+                BackgroundColor3 = 'AccentColor';
+            });
+
+            Library:AddToRegistry(InputButton, {
+                TextColor3 = 'FontColor';
+            });
+
+            Library:AddToRegistry(Stroke, {
+                Color = 'OutlineColor';
+            });
+
+            Library:MakeDraggable(ButtonFrame, math.huge);
+            Library:MakeDraggable(InputButton, math.huge, ButtonFrame);
+
+            disconnectMobileConnections();
+
+            local clickConnection = InputButton.MouseButton1Click:Connect(function()
+                if KeyPicker.Mode == 'Hold' then
+                    return;
+                end;
+
+                KeyPicker.Toggled = not KeyPicker.Toggled;
+                KeyPicker:DoClick();
+                KeyPicker:Update();
+            end);
+
+            local downConnection = InputButton.MouseButton1Down:Connect(function()
+                if KeyPicker.Mode ~= 'Hold' then
+                    return;
+                end;
+
+                if not KeyPicker.Toggled then
+                    KeyPicker.Toggled = true;
+                    KeyPicker:DoClick();
+                    KeyPicker:Update();
+                end;
+            end);
+
+            local upConnection = InputButton.MouseButton1Up:Connect(function()
+                if KeyPicker.Mode ~= 'Hold' then
+                    return;
+                end;
+
+                if KeyPicker.Toggled then
+                    KeyPicker.Toggled = false;
+                    KeyPicker:DoClick();
+                    KeyPicker:Update();
+                end;
+            end);
+
+            KeyPicker.MobileButtonConnections = {
+                clickConnection;
+                downConnection;
+                upConnection;
+            };
+
+            KeyPicker.MobileButton = ButtonFrame;
+            KeyPicker.MobileButtonHighlight = Highlight;
+            KeyPicker.MobileButtonInput = InputButton;
+
+            KeyPicker:UpdateMobileButtonState();
+            KeyPicker:Update();
+
+            return ButtonFrame;
+        end;
+
+        function KeyPicker:MatchesInput(Input)
+            if KeyPicker.Value == 'None' then
+                return false;
+            end;
+
+            if Input.UserInputType == Enum.UserInputType.Keyboard then
+                if Input.KeyCode == Enum.KeyCode.Unknown then
+                    return false;
+                end;
+
+                return Input.KeyCode.Name == KeyPicker.Value;
+            elseif Input.UserInputType == Enum.UserInputType.MouseButton1 then
+                return KeyPicker.Value == 'MB1';
+            elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+                return KeyPicker.Value == 'MB2';
+            end;
+
+            return false;
+        end;
 
         function KeyPicker:GetState()
+            if Library.IsMobile then
+                if KeyPicker.Mode == 'Always' then
+                    return true;
+                elseif KeyPicker.Mode == 'Hold' then
+                    return KeyPicker.Toggled;
+                else
+                    return KeyPicker.Toggled;
+                end;
+            end;
+
             if KeyPicker.Mode == 'Always' then
                 return true;
             elseif KeyPicker.Mode == 'Hold' then
@@ -1449,6 +2116,58 @@ do
             else
                 return KeyPicker.Toggled;
             end;
+        end;
+
+        local Modes = Info.Modes or { 'Always', 'Toggle', 'Hold' };
+        local ModeButtons = {};
+
+        for Idx, Mode in next, Modes do
+            local ModeButton = {};
+
+            local Label = Library:CreateLabel({
+                Active = false;
+                Size = UDim2.new(1, 0, 0, 15);
+                TextSize = 13;
+                Text = Mode;
+                ZIndex = 16;
+                Parent = ModeSelectInner;
+            });
+
+            function ModeButton:Select()
+                for _, Button in next, ModeButtons do
+                    Button:Deselect();
+                end;
+
+                KeyPicker.Mode = Mode;
+
+                Label.TextColor3 = Library.AccentColor;
+                Library.RegistryMap[Label].Properties.TextColor3 = 'AccentColor';
+
+                toggleModeSelect(false);
+                KeyPicker:Update();
+            end;
+
+            function ModeButton:Deselect()
+                KeyPicker.Mode = nil;
+
+                Label.TextColor3 = Library.FontColor;
+                Library.RegistryMap[Label].Properties.TextColor3 = 'FontColor';
+            end;
+
+            Label.InputBegan:Connect(function(Input)
+                if Input.UserInputType == Enum.UserInputType.MouseButton1
+                    or Input.UserInputType == Enum.UserInputType.Touch then
+
+                    ModeButton:Select();
+                    Library:AttemptSave();
+                end;
+            end);
+
+            if Mode == KeyPicker.Mode then
+                ModeButton:Select();
+            end;
+
+            ModeButtons[Mode] = ModeButton;
         end;
 
         function KeyPicker:SetValue(Data)
@@ -1548,7 +2267,7 @@ do
             if ParentObj.Type == 'Toggle' and KeyPicker.SyncToggleState then
                 ParentObj:SetValue(not ParentObj.Value)
             end
-            
+
             --Library:Notify(("%s has been toggled %s"):format(KeyPicker.Text, KeyPicker.Value and "ON" or "OFF"))
             Library:SafeCallback(KeyPicker.Callback, KeyPicker.Toggled)
             Library:SafeCallback(KeyPicker.Clicked, KeyPicker.Toggled)
@@ -1557,7 +2276,10 @@ do
         local Picking = false;
 
         PickOuter.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+            if Input.UserInputType == Enum.UserInputType.MouseButton1
+                and (not Library.IsMobile)
+                and not Library:MouseIsOverOpenedFrame() then
+
                 toggleModeSelect(false);
                 Picking = true;
 
@@ -1622,6 +2344,47 @@ do
                 end);
             elseif Input.UserInputType == Enum.UserInputType.MouseButton2 and not Library:MouseIsOverOpenedFrame() then
                 toggleModeSelect(not ModeSelectOuter.Visible);
+            elseif Library.IsMobile and Library:IsMobileInput(Input) and not Library:MouseIsOverOpenedFrame() then
+                if Info.NoUI then
+                    return;
+                end;
+
+                toggleModeSelect(false);
+
+                local holdTriggered = false;
+                local cancelled = false;
+
+                task.delay(0.45, function()
+                    if cancelled then
+                        return;
+                    end;
+
+                    holdTriggered = true;
+                    UpdateModeSelectPosition();
+                    toggleModeSelect(true);
+                end);
+
+                local changed;
+                changed = Input.Changed:Connect(function()
+                    if Input.UserInputState == Enum.UserInputState.End
+                        or Input.UserInputState == Enum.UserInputState.Cancel then
+
+                        cancelled = true;
+
+                        if changed then
+                            changed:Disconnect();
+                            changed = nil;
+                        end;
+
+                        if not holdTriggered then
+                            if KeyPicker.MobileButton then
+                                KeyPicker:RemoveMobileButton();
+                            else
+                                KeyPicker:EnsureMobileButton();
+                            end;
+                        end;
+                    end;
+                end);
             end;
         end);
 
@@ -1637,11 +2400,22 @@ do
                 KeyPicker:Update();
             end;
 
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+            if Input.UserInputType == Enum.UserInputType.MouseButton1
+                or Input.UserInputType == Enum.UserInputType.Touch then
+
                 local AbsPos, AbsSize = ModeSelectOuter.AbsolutePosition, ModeSelectOuter.AbsoluteSize;
 
-                if Mouse.X < AbsPos.X or Mouse.X > AbsPos.X + AbsSize.X
-                    or Mouse.Y < (AbsPos.Y - 20 - 1) or Mouse.Y > AbsPos.Y + AbsSize.Y then
+                local posX, posY;
+
+                if Input.UserInputType == Enum.UserInputType.Touch then
+                    local inputPos = Input.Position;
+                    posX, posY = inputPos.X, inputPos.Y;
+                else
+                    posX, posY = Mouse.X, Mouse.Y;
+                end;
+
+                if posX < AbsPos.X or posX > AbsPos.X + AbsSize.X
+                    or posY < (AbsPos.Y - 20 - 1) or posY > AbsPos.Y + AbsSize.Y then
 
                     toggleModeSelect(false);
                 end;
@@ -1653,6 +2427,14 @@ do
                 KeyPicker:Update();
             end;
         end))
+
+        Library:GiveSignal(PickOuter.AncestryChanged:Connect(function()
+            if not PickOuter:IsDescendantOf(game) then
+                if KeyPicker.MobileButton then
+                    KeyPicker:RemoveMobileButton();
+                end;
+            end;
+        end));
 
         KeyPicker:Update();
 
@@ -3235,7 +4017,7 @@ do
         local Depbox = {
             Dependencies = {};
         };
-        
+
         local Groupbox = self;
         local Container = Groupbox.Container;
 
@@ -3544,6 +4326,8 @@ do
         BackgroundColor3 = 'MainColor';
     });
 
+    Library:MakeDraggable(HeaderBackground, math.huge, KeybindFrame);
+
     local HeaderShadow = Library:Create('TextLabel', {
         BackgroundTransparency = 1;
         Font = Enum.Font.Gotham;
@@ -3595,6 +4379,7 @@ do
     });
 
     Library.KeybindFrame = KeybindFrame;
+    KeybindFrame.Visible = Library.KeybindListVisible;
     Library.KeybindContainer = KeybindContainer;
     Library.KeybindHeaderShadow = HeaderShadow;
     Library.KeybindHeaderLabel = HeaderLabel;
@@ -3775,6 +4560,23 @@ function Library:CreateWindow(...)
         BackgroundColor3 = 'BackgroundColor';
     });
 
+    do
+        local size = Config.Size;
+        local width = size.X.Offset;
+        local height = size.Y.Offset;
+
+        if size.X.Scale ~= 0 then
+            width = math.max(Outer.AbsoluteSize.X / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        if size.Y.Scale ~= 0 then
+            height = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, width), math.max(1, height));
+        Library:UpdateResponsiveScale();
+    end;
+
     local OuterStroke = Library:Create('UIStroke', {
         Color = Library.OutlineColor;
         Thickness = 1;
@@ -3788,6 +4590,23 @@ function Library:CreateWindow(...)
 
     Library:MakeDraggable(Outer, 60);
 
+    Library:GiveSignal(Outer:GetPropertyChangedSignal('Size'):Connect(function()
+        local size = Outer.Size;
+        local width = size.X.Offset;
+        local height = size.Y.Offset;
+
+        if size.X.Scale ~= 0 then
+            width = math.max(Outer.AbsoluteSize.X / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        if size.Y.Scale ~= 0 then
+            height = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, width), math.max(1, height));
+        Library:UpdateResponsiveScale();
+    end));
+
     Window.Outer = Outer;
     Window.Config = Config;
     Window.SidebarWidth = SidebarWidth;
@@ -3822,6 +4641,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -3875,6 +4703,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -3928,6 +4765,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -3981,6 +4827,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -4034,6 +4889,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -4087,6 +4951,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -4140,6 +5013,15 @@ function Library:CreateWindow(...)
 
         Outer.Size = newSize;
         Window.Config.Size = newSize;
+
+        local baseHeight = yOffset;
+
+        if yScale ~= 0 then
+            baseHeight = math.max(Outer.AbsoluteSize.Y / math.max(Library.CurrentScale, 1e-3), 1);
+        end;
+
+        Library.WindowBaseSize = Vector2.new(math.max(1, newWidth), math.max(1, baseHeight));
+        Library:UpdateResponsiveScale();
     end;
 
     function Window:EnsureContainerWidth(minWidth)
@@ -4211,6 +5093,8 @@ function Library:CreateWindow(...)
             return Library:GetDarkerColor(Library.MainColor);
         end;
     });
+
+    Library:MakeDraggable(TitleBar, math.huge, Outer);
 
     Library:Create('UICorner', {
         CornerRadius = UDim.new(0, 8);
@@ -5243,6 +6127,9 @@ function Library:CreateWindow(...)
         Fading = true;
         Toggled = (not Toggled);
         ModalElement.Modal = Toggled;
+
+        Library.MenuOpen = Toggled;
+        Library:UpdateMobileMenuButtonState(Toggled);
 
         if Toggled then
             previousMouseBehavior = InputService.MouseBehavior;
