@@ -5231,6 +5231,8 @@ function Library:CreateWindow(...)
     local TransparencyCache = {};
     local Toggled = false;
     local Fading = false;
+    local previousMouseBehavior;
+    local previousMouseIconEnabled;
 
     function Library:Toggle()
         if Fading then
@@ -5240,9 +5242,13 @@ function Library:CreateWindow(...)
         local FadeTime = Config.MenuFadeTime;
         Fading = true;
         Toggled = (not Toggled);
-        ModalElement.Modal = (((Toggles.UnlockMouse and Toggles.UnlockMouse.Value) or false) and Toggled) or false;
+        ModalElement.Modal = Toggled;
 
         if Toggled then
+            previousMouseBehavior = InputService.MouseBehavior;
+            previousMouseIconEnabled = InputService.MouseIconEnabled;
+            InputService.MouseBehavior = Enum.MouseBehavior.Default;
+            InputService.MouseIconEnabled = true;
             -- A bit scuffed, but if we're going from not toggled -> toggled we want to show the frame immediately so that the fade is visible.
             Outer.Visible = true;
             if WindowShadow then
@@ -5288,6 +5294,16 @@ function Library:CreateWindow(...)
                 CursorOutline:Remove();
             end);
             ]]
+        else
+            if previousMouseBehavior then
+                InputService.MouseBehavior = previousMouseBehavior;
+                previousMouseBehavior = nil;
+            end;
+
+            if previousMouseIconEnabled ~= nil then
+                InputService.MouseIconEnabled = previousMouseIconEnabled;
+                previousMouseIconEnabled = nil;
+            end;
         end;
 
         for _, Desc in next, Outer:GetDescendants() do
