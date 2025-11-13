@@ -748,6 +748,8 @@ end
 Library:GiveSignal(Workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(updateViewportConnection));
 updateViewportConnection();
 
+Library:UpdateMobileMode();
+
 function Library:MouseIsOverOpenedFrame()
     for Frame, _ in next, Library.OpenedFrames do
         local AbsPos, AbsSize = Frame.AbsolutePosition, Frame.AbsoluteSize;
@@ -806,12 +808,6 @@ function Library:AddToRegistry(Instance, Properties, IsHud)
         table.insert(Library.HudRegistry, Data);
     end;
 end;
-
-function Library:AddRegistry(...)
-    return self:AddToRegistry(...);
-end;
-
-Library:UpdateMobileMode();
 
 function Library:RemoveFromRegistry(Instance)
     local Data = Library.RegistryMap[Instance];
