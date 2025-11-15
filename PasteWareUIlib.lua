@@ -5431,10 +5431,10 @@ function Library:CreateWindow(...)
         Color = buildTabGradientSequence;
     });
 
-    local TabListLayout = Library:Create('UIListLayout', {
-        Padding = UDim.new(0, Config.TabPadding > 0 and Config.TabPadding or 4);
-        FillDirection = Enum.FillDirection.Vertical;
-        HorizontalAlignment = Enum.HorizontalAlignment.Left;
+   local TabListLayout = Library:Create('UIListLayout', {
+        Padding = UDim.new(0, Config.TabPadding);
+        FillDirection = Enum.FillDirection.Horizontal;
+        HorizontalFlex = Enum.UIFlexAlignment.Fill;
         SortOrder = Enum.SortOrder.LayoutOrder;
         Parent = TabArea;
     });
@@ -6317,5 +6317,6 @@ Players.PlayerRemoving:Connect(OnPlayerChange);
 
 getgenv().Library = Library
 return Library
+
 
 
