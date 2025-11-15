@@ -1,15 +1,14 @@
-local InputService = cloneref(game:GetService('UserInputService'));
-local TextService = cloneref(game:GetService('TextService'));
-local CoreGui = gethui();
-local Teams = cloneref(game:GetService('Teams'));
-local Players = cloneref(game:GetService('Players'));
-local RunService = cloneref(game:GetService('RunService'));
-local TweenService = cloneref(game:GetService('TweenService'));
-local RenderStepped = RunService.RenderStepped;
-local LocalPlayer = cloneref(Players.LocalPlayer);
-local Mouse = cloneref(LocalPlayer:GetMouse());
+local Players = cloneref(game:GetService("Players"))
+local RunService = cloneref(game:GetService("RunService"))
+local InputService = cloneref(game:GetService("UserInputService"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
+local TextService = cloneref(game:GetService("TextService"))
 local Workspace = cloneref(game:GetService("Workspace"))
-
+local Teams = cloneref(game:GetService('Teams'))
+local TweenService = game:GetService('TweenService');
+local RenderStepped = RunService.RenderStepped;
+local LocalPlayer = Players.LocalPlayer;
+local Mouse = LocalPlayer:GetMouse();
 
 local ProtectGui = protectgui or (syn and syn.protect_gui) or (function() end);
 
@@ -2551,18 +2550,13 @@ do
                 Parent = LabelHolder;
             });
 
-             if DoesWrap then
-            local Y = select(2, Library:GetTextBounds(Text, Library.Font, 14, Vector2.new(TextLabel.AbsoluteSize.X, math.huge)))
-            TextLabel.Size = UDim2.new(1, -4, 0, Y)
-        else
             Library:Create('UIListLayout', {
                 Padding = UDim.new(0, 4);
                 FillDirection = Enum.FillDirection.Horizontal;
                 HorizontalAlignment = Enum.HorizontalAlignment.Right;
+                VerticalAlignment = Enum.VerticalAlignment.Center;
                 SortOrder = Enum.SortOrder.LayoutOrder;
-                Parent = TextLabel;
-            });
-        end
+                Parent = LabelAddonHolder;
             });
 
             local function RefreshLabelLayout()
@@ -5431,7 +5425,7 @@ function Library:CreateWindow(...)
         Color = buildTabGradientSequence;
     });
 
-   local TabListLayout = Library:Create('UIListLayout', {
+    local TabListLayout = Library:Create('UIListLayout', {
         Padding = UDim.new(0, Config.TabPadding);
         FillDirection = Enum.FillDirection.Horizontal;
         HorizontalFlex = Enum.UIFlexAlignment.Fill;
@@ -6317,6 +6311,3 @@ Players.PlayerRemoving:Connect(OnPlayerChange);
 
 getgenv().Library = Library
 return Library
-
-
-
