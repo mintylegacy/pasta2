@@ -2551,13 +2551,18 @@ do
                 Parent = LabelHolder;
             });
 
+             if DoesWrap then
+            local Y = select(2, Library:GetTextBounds(Text, Library.Font, 14, Vector2.new(TextLabel.AbsoluteSize.X, math.huge)))
+            TextLabel.Size = UDim2.new(1, -4, 0, Y)
+        else
             Library:Create('UIListLayout', {
                 Padding = UDim.new(0, 4);
                 FillDirection = Enum.FillDirection.Horizontal;
                 HorizontalAlignment = Enum.HorizontalAlignment.Right;
-                VerticalAlignment = Enum.VerticalAlignment.Center;
                 SortOrder = Enum.SortOrder.LayoutOrder;
-                Parent = LabelAddonHolder;
+                Parent = TextLabel;
+            });
+        end
             });
 
             local function RefreshLabelLayout()
@@ -6312,4 +6317,5 @@ Players.PlayerRemoving:Connect(OnPlayerChange);
 
 getgenv().Library = Library
 return Library
+
 
